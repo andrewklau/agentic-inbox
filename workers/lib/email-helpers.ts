@@ -54,6 +54,7 @@ export function validateSender(
 	to: string | string[],
 	from: string | { email: string; name: string },
 	mailboxId: string,
+	allowedDomains: string[] = [],
 ): { toStr: string; fromEmail: string; fromDomain: string } {
 	const toStr = (Array.isArray(to) ? to.join(", ") : to).toLowerCase();
 	const fromEmail = (typeof from === "string" ? from : from.email).toLowerCase();
@@ -65,6 +66,10 @@ export function validateSender(
 	const fromDomain = fromEmail.split("@")[1];
 	if (!fromDomain) {
 		throw new SenderValidationError("Invalid sender email address");
+	}
+
+	if (allowedDomains.length > 0 && !allowedDomains.includes(fromDomain)) {
+		throw new SenderValidationError("Sender domain is not configured in DOMAINS");
 	}
 
 	return { toStr, fromEmail, fromDomain };

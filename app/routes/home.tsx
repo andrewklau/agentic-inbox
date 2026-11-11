@@ -13,7 +13,6 @@ import {
 	useKumoToastManager,
 } from "@cloudflare/kumo";
 import { EnvelopeIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
-import { useQuery } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Link as RouterLink } from "react-router";
 import api from "~/services/api";
@@ -22,7 +21,7 @@ import {
 	useDeleteMailbox,
 	useMailboxes,
 } from "~/queries/mailboxes";
-import { queryKeys } from "~/queries/keys";
+import { useAppConfig } from "~/queries/config";
 
 export function meta() {
 	return [{ title: "Agentic Inbox" }];
@@ -34,11 +33,7 @@ export default function HomeRoute() {
 	const createMailbox = useCreateMailbox();
 	const deleteMailbox = useDeleteMailbox();
 
-	const { data: configData } = useQuery({
-		queryKey: queryKeys.config,
-		queryFn: () => api.getConfig(),
-		staleTime: Infinity, // config rarely changes
-	});
+	const { data: configData } = useAppConfig();
 
 	const domains = configData?.domains ?? [];
 	const emailAddresses = configData?.emailAddresses ?? [];

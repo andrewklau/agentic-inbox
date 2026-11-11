@@ -6,6 +6,7 @@ import { Badge, Button, Input, Loader, useKumoToastManager } from "@cloudflare/k
 import { RobotIcon, ArrowCounterClockwiseIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { useParams } from "react-router";
+import { useAgentEnabled } from "~/queries/config";
 import { useMailbox, useUpdateMailbox } from "~/queries/mailboxes";
 
 // Placeholder shown in the textarea when no custom prompt is set.
@@ -17,6 +18,7 @@ export default function SettingsRoute() {
 	const toastManager = useKumoToastManager();
 	const { data: mailbox } = useMailbox(mailboxId);
 	const updateMailboxMutation = useUpdateMailbox();
+	const agentEnabled = useAgentEnabled();
 
 	const [displayName, setDisplayName] = useState("");
 	const [agentPrompt, setAgentPrompt] = useState("");
@@ -85,6 +87,7 @@ export default function SettingsRoute() {
 				</div>
 
 				{/* Agent System Prompt */}
+				{agentEnabled && (
 				<div className="rounded-lg border border-kumo-line bg-kumo-base p-5">
 					<div className="flex items-center justify-between mb-4">
 						<div className="flex items-center gap-2">
@@ -125,6 +128,7 @@ export default function SettingsRoute() {
 						It controls the agent's personality, writing style, and behavior rules.
 					</p>
 				</div>
+				)}
 
 				{/* Save */}
 				<div className="flex justify-end">

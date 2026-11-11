@@ -8,6 +8,7 @@ import AgentSidebar from "~/components/AgentSidebar";
 import ComposeEmail from "~/components/ComposeEmail";
 import Header from "~/components/Header";
 import Sidebar from "~/components/Sidebar";
+import { useAgentEnabled } from "~/queries/config";
 import { useMailbox } from "~/queries/mailboxes";
 import { useUIStore } from "~/hooks/useUIStore";
 
@@ -15,6 +16,7 @@ export default function MailboxRoute() {
 	const { mailboxId } = useParams<{ mailboxId: string }>();
 	// Prefetch mailbox data for child components
 	useMailbox(mailboxId);
+	const agentEnabled = useAgentEnabled();
 	const prevMailboxIdRef = useRef<string | undefined>(undefined);
 	const {
 		isSidebarOpen,
@@ -70,7 +72,7 @@ export default function MailboxRoute() {
 			</div>
 
 			{/* Agent + MCP sidebar -- togglable on desktop */}
-			{isAgentPanelOpen && (
+			{agentEnabled && isAgentPanelOpen && (
 				<div className="hidden lg:flex w-[380px] shrink-0 border-l border-kumo-line flex-col bg-kumo-base overflow-hidden">
 					<AgentSidebar />
 				</div>

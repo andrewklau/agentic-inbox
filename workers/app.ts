@@ -7,6 +7,7 @@ import { Hono } from "hono";
 import { jwtVerify, createRemoteJWKSet } from "jose";
 import { createRequestHandler } from "react-router";
 import { app as apiApp, receiveEmail } from "./index";
+import { isAgentEnabled } from "./lib/config";
 import { EmailMCP } from "./mcp";
 import type { Env } from "./types";
 
@@ -41,6 +42,17 @@ function getAccessUrls(teamDomain: string) {
 
 // Main app that wraps the API and adds React Router fallback
 const app = new Hono<{ Bindings: Env }>();
+
+// Baseline security headers for every response.
+app.use("*", async (c, next) => {
+	await next();
+	if (c.res.status === 101) return; // WebSocket upgrades
+	// Copy the response so headers are mutable (responses from Durable Objects are not).
+	c.res = new Response(c.res.body, c.res);
+	c.res.headers.set("X-Content-Type-Options", "nosniff");
+	c.res.headers.set("X-Frame-Options", "DENY");
+	c.res.headers.set("Referrer-Policy", "no-referrer");
+});
 
 // Cloudflare Access JWT validation middleware (production only)
 app.use("*", async (c, next) => {
@@ -84,9 +96,11 @@ app.use("*", async (c, next) => {
 // Must be before API routes and React Router catch-all
 const mcpHandler = EmailMCP.serve("/mcp", { binding: "EMAIL_MCP" });
 app.all("/mcp", async (c) => {
+	if (!isAgentEnabled(c.env)) return c.text("Not found", 404);
 	return mcpHandler.fetch(c.req.raw, c.env, c.executionCtx as ExecutionContext);
 });
 app.all("/mcp/*", async (c) => {
+	if (!isAgentEnabled(c.env)) return c.text("Not found", 404);
 	return mcpHandler.fetch(c.req.raw, c.env, c.executionCtx as ExecutionContext);
 });
 
@@ -95,6 +109,7 @@ app.route("/", apiApp);
 
 // Agent WebSocket routing - must be before React Router catch-all
 app.all("/agents/*", async (c) => {
+	if (!isAgentEnabled(c.env)) return c.text("Agent not found", 404);
 	const response = await routeAgentRequest(c.req.raw, c.env);
 	if (response) return response;
 	return c.text("Agent not found", 404);
@@ -111,7 +126,7 @@ app.all("*", (c) => {
 export default {
 	fetch: app.fetch,
 	async email(
-		event: { raw: ReadableStream; rawSize: number },
+		event: ForwardableEmailMessage,
 		env: Env,
 		ctx: ExecutionContext,
 	) {

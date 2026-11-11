@@ -27,6 +27,7 @@ import {
 	buildThreadingHeaders,
 } from "./email-helpers";
 import { verifyDraft } from "./ai";
+import { isConfiguredDomain } from "./config";
 import { sendEmail } from "../email-sender";
 import { Folders } from "../../shared/folders";
 import type { Env } from "../types";
@@ -419,6 +420,9 @@ export async function toolSendReply(
 	const { originalMsgId, references, threadId } = buildReferencesChain(originalEmail);
 	const fromDomain = mailboxId.split("@")[1];
 	if (!fromDomain) throw new Error("Invalid mailbox email address");
+	if (!isConfiguredDomain(env, mailboxId)) {
+		return { error: "Sender domain is not configured in DOMAINS" };
+	}
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 
 	// Verify and append quoted original message
@@ -491,6 +495,9 @@ export async function toolSendEmail(
 
 	const fromDomain = mailboxId.split("@")[1];
 	if (!fromDomain) throw new Error("Invalid mailbox email address");
+	if (!isConfiguredDomain(env, mailboxId)) {
+		return { error: "Sender domain is not configured in DOMAINS" };
+	}
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 
 	const sanitizedBody = await verifyDraft(env.AI, params.bodyHtml);

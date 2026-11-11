@@ -19,12 +19,12 @@ https://github.com/cloudflare/agentic-inbox/issues/4#issuecomment-4269118513
 
 ### To set up
 
-1. Deploy to Cloudflare. The deploy flow will automatically provision R2, Durable Objects, and Workers AI. You'll be prompted for **DOMAINS**, which is the domain (yourdomain.com) you want to receive emails for (email@yourdomain.com).
+1. Deploy to Cloudflare. The deploy flow will automatically provision R2, Durable Objects, and Workers AI. You'll be prompted for **AGENT_ENABLED**, which turns the AI agent on or off. After deploying, add a **DOMAINS** variable to the Worker (Settings > Variables and Secrets) with a comma-separated list of the domains (e.g. `yourdomain.com,otherdomain.com`) you want to receive emails for. `keep_vars` is set in `wrangler.jsonc`, so later deploys keep it.
 
      [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agentic-inbox)
 
 2. **Configure Cloudflare Access** -- Enable [one-click Cloudflare Access](https://developers.cloudflare.com/changelog/post/2025-10-03-one-click-access-for-workers/) on your Worker under Settings > Domains & Routes. The modal will show your `POLICY_AUD` and `TEAM_DOMAIN` values. `TEAM_DOMAIN` can be either your Access team URL or the full `.../cdn-cgi/access/certs` URL. **You must set these as secrets for your Worker.**
-3. **Set up Email Routing** -- In the Cloudflare dashboard, go to your domain > Email Routing and create a catch-all rule that forwards to this Worker
+3. **Set up Email Routing** -- In the Cloudflare dashboard, go to each domain > Email Routing and create a catch-all rule that forwards to this Worker
 4. **Enable Email Service** -- The worker needs the `send_email` binding to send outbound emails. See [Email Service docs](https://developers.cloudflare.com/email-routing/email-workers/send-email-workers/)
 5. **Create a mailbox** -- Visit your deployed app and create a mailbox for any address on your domain (e.g. `hello@example.com`)
 
@@ -59,8 +59,16 @@ npm run dev
 
 ### Configuration
 
-1. Set your domain in `wrangler.jsonc`
+1. Set `DOMAINS` as a Worker variable in the Cloudflare dashboard (or in `.dev.vars` for local development)
 2. Create an R2 bucket named `agentic-inbox`: `wrangler r2 bucket create agentic-inbox`
+
+| Variable | Description |
+| --- | --- |
+| `DOMAINS` | Dashboard variable. Comma-separated list of domains this app receives and sends mail for. Mailboxes can only be created on these domains, and mail is only accepted and sent for them. |
+| `EMAIL_ADDRESSES` | Optional dashboard variable: allowlist of addresses (JSON array or comma-separated). When set, only these mailboxes can be created and receive mail. |
+| `AGENT_ENABLED` | Set in `wrangler.jsonc`. `"true"` to enable the AI agent panel, auto-drafted replies and the `/mcp` endpoint. `"false"` turns all of them off. Defaults to enabled when unset. |
+
+Incoming mail is delivered to the mailbox matching the envelope recipient, so Bcc'd and Cc'd copies arrive as expected. Sub-addresses (`user+tag@yourdomain.com`) are delivered to `user@yourdomain.com`. Mail for addresses without a mailbox is rejected.
 
 ### Deploy
 
@@ -73,10 +81,10 @@ npm run deploy
 - Cloudflare account with a domain
 - [Email Routing](https://developers.cloudflare.com/email-routing/) enabled for receiving
 - [Email Service](https://developers.cloudflare.com/email-service/) enabled for sending
-- [Workers AI](https://developers.cloudflare.com/workers-ai/) enabled (for the agent)
+- [Workers AI](https://developers.cloudflare.com/workers-ai/) enabled (only when `AGENT_ENABLED` is on)
 - [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) configured for deployed/shared environments (required in production)
 
-Any user who passes the shared Cloudflare Access policy can access all mailboxes in this app by design. This includes the MCP server at `/mcp` -- external AI tools (Claude Code, Cursor, etc.) connected via MCP can operate on any mailbox by passing a `mailboxId` parameter. There is no per-mailbox authorization; the Cloudflare Access policy is the single trust boundary.
+Any user who passes the shared Cloudflare Access policy can access all mailboxes in this app by design. When the agent is enabled, this includes the MCP server at `/mcp` -- external AI tools (Claude Code, Cursor, etc.) connected via MCP can operate on any mailbox by passing a `mailboxId` parameter. There is no per-mailbox authorization; the Cloudflare Access policy is the single trust boundary.
 
 ## Architecture
 

@@ -7,6 +7,7 @@ import { GearSixIcon, ListIcon, MagnifyingGlassIcon, RobotIcon, XIcon } from "@p
 import { type KeyboardEvent, useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { useUIStore } from "~/hooks/useUIStore";
+import { useAgentEnabled } from "~/queries/config";
 
 export default function Header() {
 	const [searchQuery, setSearchQuery] = useState("");
@@ -16,6 +17,7 @@ export default function Header() {
 	const location = useLocation();
 	const [searchParams] = useSearchParams();
 	const { toggleSidebar, toggleAgentPanel, isAgentPanelOpen } = useUIStore();
+	const agentEnabled = useAgentEnabled();
 
 	// Sync search input with URL query param so it stays populated
 	const urlQuery = searchParams.get("q") || "";
@@ -119,16 +121,18 @@ export default function Header() {
 			)}
 
 			<div className="flex items-center gap-1 ml-auto shrink-0">
-				<Tooltip content={isAgentPanelOpen ? "Hide agent panel" : "Show agent panel"} side="bottom" asChild>
-					<Button
-						variant={isAgentPanelOpen ? "secondary" : "ghost"}
-						shape="square"
-						icon={<RobotIcon size={20} />}
-						onClick={toggleAgentPanel}
-						aria-label="Toggle agent panel"
-						className="hidden lg:inline-flex"
-					/>
-				</Tooltip>
+				{agentEnabled && (
+					<Tooltip content={isAgentPanelOpen ? "Hide agent panel" : "Show agent panel"} side="bottom" asChild>
+						<Button
+							variant={isAgentPanelOpen ? "secondary" : "ghost"}
+							shape="square"
+							icon={<RobotIcon size={20} />}
+							onClick={toggleAgentPanel}
+							aria-label="Toggle agent panel"
+							className="hidden lg:inline-flex"
+						/>
+					</Tooltip>
+				)}
 				<Tooltip content="Settings" side="bottom" asChild>
 					<Button
 						variant={isSettingsActive ? "secondary" : "ghost"}

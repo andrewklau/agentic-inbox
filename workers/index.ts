@@ -20,6 +20,7 @@ import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
 import { requireMailbox, type MailboxContext } from "./lib/mailbox";
+import { getConfiguredAddresses, getConfiguredDomains, isAgentEnabled, isConfiguredDomain } from "./lib/config";
 
 type AppContext = Context<MailboxContext>;
 
@@ -86,10 +87,11 @@ app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
 // -- Config ---------------------------------------------------------
 
 app.get("/api/v1/config", (c) => {
-	const domainsRaw = c.env.DOMAINS || "";
-	const domains = domainsRaw.split(",").map((d) => d.trim()).filter(Boolean);
-	const emailAddresses = c.env.EMAIL_ADDRESSES ?? [];
-	return c.json({ domains, emailAddresses });
+	return c.json({
+		domains: getConfiguredDomains(c.env),
+		emailAddresses: getConfiguredAddresses(c.env),
+		agentEnabled: isAgentEnabled(c.env),
+	});
 });
 
 // -- Mailboxes ------------------------------------------------------
@@ -102,8 +104,11 @@ app.get("/api/v1/mailboxes", async (c) => {
 app.post("/api/v1/mailboxes", async (c) => {
 	const { name, settings, email: rawEmail } = CreateMailboxBody.parse(await c.req.json());
 	const email = rawEmail.toLowerCase();
-	const allowedAddresses = (c.env.EMAIL_ADDRESSES ?? []) as string[];
-	if (allowedAddresses.length > 0 && !allowedAddresses.map((a) => a.toLowerCase()).includes(email)) {
+	if (!isConfiguredDomain(c.env, email)) {
+		return c.json({ error: "Mailbox domain is not configured in DOMAINS" }, 400);
+	}
+	const allowedAddresses = getConfiguredAddresses(c.env);
+	if (allowedAddresses.length > 0 && !allowedAddresses.includes(email)) {
 		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES" }, 403);
 	}
 	const key = `mailboxes/${email}.json`;
@@ -136,7 +141,20 @@ app.delete("/api/v1/mailboxes/:mailboxId", async (c) => {
 	const mailboxId = c.req.param("mailboxId")!;
 	const key = `mailboxes/${mailboxId}.json`;
 	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found" }, 404);
-	await c.env.BUCKET.delete(key); // TODO: also delete DO data and R2 attachment blobs
+	// Remove the mailbox's stored mail first, so a failed delete can be retried
+	// and re-creating the address starts empty.
+	const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(mailboxId));
+	const attachmentKeys = await stub.purge();
+	for (let i = 0; i < attachmentKeys.length; i += 1000) {
+		await c.env.BUCKET.delete(attachmentKeys.slice(i, i + 1000)).catch((e) =>
+			console.error("Failed to delete attachment blobs:", (e as Error).message));
+	}
+	try {
+		await c.env.EMAIL_AGENT.get(c.env.EMAIL_AGENT.idFromName(mailboxId)).clearHistory();
+	} catch (e) {
+		console.error("Failed to clear agent history:", (e as Error).message);
+	}
+	await c.env.BUCKET.delete(key);
 	return c.body(null, 204);
 });
 
@@ -172,7 +190,7 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 
 	let toStr: string, fromEmail: string, fromDomain: string;
 	try {
-		({ toStr, fromEmail, fromDomain } = validateSender(to, from, mailboxId));
+		({ toStr, fromEmail, fromDomain } = validateSender(to, from, mailboxId, getConfiguredDomains(c.env)));
 	} catch (e) {
 		if (e instanceof SenderValidationError) return c.json({ error: e.message }, 400);
 		throw e;
@@ -315,13 +333,17 @@ app.get("/api/v1/mailboxes/:mailboxId/emails/:emailId/attachments/:attachmentId"
 	const emailId = c.req.param("emailId")!;
 	const attachmentId = c.req.param("attachmentId")!;
 	const attachment = await c.var.mailboxStub.getAttachment(attachmentId);
-	if (!attachment) return c.json({ error: "Attachment not found" }, 404);
+	if (!attachment || attachment.email_id !== emailId) return c.json({ error: "Attachment not found" }, 404);
 	const obj = await c.env.BUCKET.get(`attachments/${emailId}/${attachmentId}/${attachment.filename}`);
 	if (!obj) return c.json({ error: "Attachment file not found" }, 404);
 	const headers = new Headers();
 	headers.set("Content-Type", attachment.mimetype);
 	const sanitized = attachment.filename.replace(/[\x00-\x1f"\\]/g, "_");
 	headers.set("Content-Disposition", `attachment; filename="${sanitized}"; filename*=UTF-8''${encodeURIComponent(attachment.filename)}`);
+	// The MIME type comes from the sender; never let the browser render it as part of the app.
+	headers.set("X-Content-Type-Options", "nosniff");
+	headers.set("Content-Security-Policy", "sandbox; default-src 'none'");
+	headers.set("Cache-Control", "private, no-store");
 	return new Response(obj.body, { headers });
 });
 
@@ -345,27 +367,88 @@ async function streamToArrayBuffer(stream: ReadableStream, streamSize: number) {
 	return result;
 }
 
-async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env: Env, ctx: ExecutionContext) {
+export interface InboundEmailEvent {
+	raw: ReadableStream;
+	rawSize: number;
+	/** Envelope recipient (RCPT TO). Set by Email Routing, one per delivery. */
+	to?: string;
+	/** Envelope sender (MAIL FROM). */
+	from?: string;
+	/** Reject the message during the SMTP transaction. */
+	setReject?: (reason: string) => void;
+}
+
+type ParsedEmail = Awaited<ReturnType<PostalMime["parse"]>>;
+
+function addressList(list: ParsedEmail["to"] | ParsedEmail["cc"]): string[] {
+	return (list || []).map((a) => a.address?.trim().toLowerCase()).filter(Boolean) as string[];
+}
+
+/** "user+tag@example.com" -> "user@example.com" (unchanged when there is no tag). */
+function stripPlusTag(address: string): string {
+	const at = address.lastIndexOf("@");
+	if (at === -1) return address;
+	const local = address.slice(0, at);
+	const plus = local.indexOf("+");
+	return plus > 0 ? `${local.slice(0, plus)}${address.slice(at)}` : address;
+}
+
+/**
+ * Map a recipient address to an existing mailbox, honouring DOMAINS and
+ * EMAIL_ADDRESSES. Sub-addresses ("user+tag@") fall back to the base mailbox.
+ */
+async function resolveMailboxForRecipient(env: Env, address: string): Promise<string | null> {
+	const allowed = getConfiguredAddresses(env);
+	const normalized = address.trim().toLowerCase();
+	for (const candidate of new Set([normalized, stripPlusTag(normalized)])) {
+		if (!candidate.includes("@")) continue;
+		if (!isConfiguredDomain(env, candidate)) continue;
+		if (allowed.length > 0 && !allowed.includes(candidate)) continue;
+		if (await env.BUCKET.head(`mailboxes/${candidate}.json`)) return candidate;
+	}
+	return null;
+}
+
+async function receiveEmail(event: InboundEmailEvent, env: Env, ctx: ExecutionContext) {
 	const rawEmail = await streamToArrayBuffer(event.raw, event.rawSize);
 	const parsedEmail = await new PostalMime().parse(rawEmail);
 
-	if (!parsedEmail.to?.length || !parsedEmail.to[0].address) throw new Error("received email with empty to");
+	const toRecipients = addressList(parsedEmail.to);
+	const ccRecipients = addressList(parsedEmail.cc);
+	const bccRecipients = addressList(parsedEmail.bcc);
 
-	const allowedAddresses = ((env.EMAIL_ADDRESSES ?? []) as string[]).map((a) => a.toLowerCase());
-	const allRecipients = parsedEmail.to.map((t) => t.address?.toLowerCase()).filter(Boolean) as string[];
-	const ccRecipients = (parsedEmail.cc || []).map((e) => e.address?.toLowerCase()).filter(Boolean) as string[];
-	const bccRecipients = (parsedEmail.bcc || []).map((e) => e.address?.toLowerCase()).filter(Boolean) as string[];
+	// The envelope recipient is authoritative: it is set for Bcc'd copies and
+	// for every recipient on a message. Headers are only used when it is
+	// missing (e.g. local testing), in which case every matching mailbox gets
+	// a copy.
+	const envelopeTo = event.to?.trim().toLowerCase();
+	const candidates = envelopeTo ? [envelopeTo] : [...new Set([...toRecipients, ...ccRecipients, ...bccRecipients])];
+	const mailboxIds = new Set<string>();
+	for (const candidate of candidates) {
+		const mailboxId = await resolveMailboxForRecipient(env, candidate);
+		if (mailboxId) mailboxIds.add(mailboxId);
+	}
 
-	let mailboxId: string | undefined;
-	if (allowedAddresses.length > 0) {
-		mailboxId = allRecipients.find((addr) => allowedAddresses.includes(addr));
-		if (!mailboxId) { console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES.`); return; }
-	} else { mailboxId = allRecipients[0]; }
-	if (!mailboxId) throw new Error("received email with no valid recipient address");
+	if (mailboxIds.size === 0) {
+		console.log(`Rejecting email: no mailbox for ${envelopeTo || "header recipients"}`);
+		event.setReject?.("Address not found");
+		return;
+	}
 
+	for (const mailboxId of mailboxIds) {
+		await deliverToMailbox(env, ctx, mailboxId, parsedEmail, { toRecipients, ccRecipients, bccRecipients });
+	}
+}
+
+async function deliverToMailbox(
+	env: Env,
+	ctx: ExecutionContext,
+	mailboxId: string,
+	parsedEmail: ParsedEmail,
+	recipients: { toRecipients: string[]; ccRecipients: string[]; bccRecipients: string[] },
+) {
+	const { toRecipients, ccRecipients, bccRecipients } = recipients;
 	const messageId = crypto.randomUUID();
-	if (!(await env.BUCKET.head(`mailboxes/${mailboxId}.json`))) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
-
 	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(mailboxId));
 
 	const attachmentData: StoredAttachment[] = [];
@@ -394,7 +477,7 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 
 	await stub.createEmail(Folders.INBOX, {
 		id: messageId, subject: parsedEmail.subject || "",
-		sender: (parsedEmail.from?.address || "").toLowerCase(), recipient: allRecipients.join(", "),
+		sender: (parsedEmail.from?.address || "").toLowerCase(), recipient: (toRecipients.length ? toRecipients : [mailboxId]).join(", "),
 		cc: ccRecipients.join(", ") || null, bcc: bccRecipients.join(", ") || null,
 		date: new Date().toISOString(), // uses receive time, not the email's Date header
 		body: parsedEmail.html || parsedEmail.text || "",
@@ -402,6 +485,7 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 		thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
 	}, attachmentData);
 
+	if (!isAgentEnabled(env)) return;
 	const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(mailboxId));
 	ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
 		method: "POST", headers: { "Content-Type": "application/json" },

@@ -560,6 +560,25 @@ export class MailboxDO extends DurableObject<Env> {
 		return emailAttachments;
 	}
 
+	/**
+	 * Delete every email, folder and attachment record in this mailbox and
+	 * return the R2 keys of its attachment blobs so the caller can remove them.
+	 */
+	async purge(): Promise<string[]> {
+		const rows = this.db
+			.select({
+				id: schema.attachments.id,
+				email_id: schema.attachments.email_id,
+				filename: schema.attachments.filename,
+			})
+			.from(schema.attachments)
+			.all();
+		await this.ctx.storage.deleteAll();
+		// Recreate the schema so the instance stays usable if the mailbox is re-created.
+		applyMigrations(this.ctx.storage.sql, mailboxMigrations, this.ctx.storage);
+		return rows.map((r) => `attachments/${r.email_id}/${r.id}/${r.filename}`);
+	}
+
 	async getAttachment(id: string) {
 		return (
 			this.db

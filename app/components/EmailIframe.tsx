@@ -5,6 +5,13 @@
 import DOMPurify from "dompurify";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+function forceNewTabLinks(node: Element) {
+	if (node.tagName === "A" && node.hasAttribute("href")) {
+		node.setAttribute("target", "_blank");
+		node.setAttribute("rel", "noopener noreferrer");
+	}
+}
+
 interface EmailIframeProps {
 	body: string;
 	/** When true, iframe auto-sizes to content height instead of filling parent */
@@ -59,12 +66,18 @@ export default function EmailIframe({ body, autoSize }: EmailIframeProps) {
 		const iframe = iframeRef.current;
 		if (!iframe || !body) return;
 
-		const cleanBody = DOMPurify.sanitize(body, {
-			USE_PROFILES: { html: true },
-			FORBID_TAGS: ["style"],
-			ADD_ATTR: ["target"],
-			FORCE_BODY: true,
-		});
+		// Links always open in a new tab, detached from this window.
+		DOMPurify.addHook("afterSanitizeAttributes", forceNewTabLinks);
+		let cleanBody: string;
+		try {
+			cleanBody = DOMPurify.sanitize(body, {
+				USE_PROFILES: { html: true },
+				FORBID_TAGS: ["style"],
+				FORCE_BODY: true,
+			});
+		} finally {
+			DOMPurify.removeHook("afterSanitizeAttributes", forceNewTabLinks);
+		}
 
 		const padding = autoSize ? "0" : "24px";
 
@@ -144,7 +157,7 @@ ul, ol { padding-left: 20px; margin: 4px 0; }
 			ref={iframeRef}
 			className="block w-full border-0"
 			style={autoSize ? { height: `${height}px` } : { height: "100%" }}
-			sandbox="allow-scripts allow-popups allow-top-navigation-by-user-activation"
+			sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
 			title="Email content"
 		/>
 	);

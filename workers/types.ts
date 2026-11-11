@@ -5,4 +5,8 @@
 export interface Env extends Cloudflare.Env {
 	POLICY_AUD: string;
 	TEAM_DOMAIN: string;
+	/** Comma-separated list of domains, e.g. "example.com,example.org". */
+	DOMAINS?: string;
+	/** Optional allowlist of addresses: a JSON array or a comma-separated string. */
+	EMAIL_ADDRESSES?: string | string[];
 }

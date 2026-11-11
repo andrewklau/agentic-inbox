@@ -9,12 +9,16 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
+	// Keep variables set in the Cloudflare dashboard (DOMAINS, EMAIL_ADDRESSES, secrets) on deploy.
+	"keep_vars": true,
 	"vars": {
 		// Production deploys must also define POLICY_AUD and TEAM_DOMAIN.
 		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
 		// The worker now fails closed outside local development if Access is not configured.
-		"DOMAINS": "example.com",
-		"EMAIL_ADDRESSES": []
+		// DOMAINS (comma-separated) and the optional EMAIL_ADDRESSES allowlist are set
+		// as variables on the Worker in the Cloudflare dashboard, or in .dev.vars locally.
+		// Set to "true" to enable the AI agent panel, auto-drafted replies and the /mcp endpoint.
+		"AGENT_ENABLED": "false"
 	},
 	"send_email": [
 		{
