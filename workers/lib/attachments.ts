@@ -6,6 +6,7 @@
  * Shared attachment storage logic.
  * Eliminates the triplicated atob → Uint8Array → R2.put pattern.
  */
+import { base64ToBytes } from "../../shared/attachments";
 import type { Env } from "../types";
 
 export interface StoredAttachment {
@@ -40,8 +41,7 @@ export async function storeAttachments(
 		// Sanitize filename to prevent path traversal in R2 keys
 		const safeFilename = (att.filename || "untitled").replace(/[\/\\:*?"<>|\x00-\x1f]/g, "_");
 		const key = `attachments/${emailId}/${attachmentId}/${safeFilename}`;
-		const binaryStr = atob(att.content);
-		const bytes = Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
+		const bytes = base64ToBytes(att.content);
 		await bucket.put(key, bytes);
 		results.push({
 			id: attachmentId,

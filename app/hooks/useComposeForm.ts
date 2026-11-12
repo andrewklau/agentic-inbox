@@ -17,6 +17,15 @@ import {
 import { useDeleteEmail, useForwardEmail, useReplyToEmail, useSaveDraft, useSendEmail } from "~/queries/emails";
 import { useMailbox } from "~/queries/mailboxes";
 import { useUIStore } from "~/hooks/useUIStore";
+import {
+	type ComposeAttachment,
+	checkLimits,
+	fromFile,
+	fromStoredEmail,
+	limitError,
+	toPayload,
+} from "~/lib/compose-attachments";
+import { base64ToBytes } from "shared/attachments";
 
 function appendUniqueAddress(
 	addresses: string[],
@@ -41,6 +50,7 @@ interface ComposeFormFields {
 	showCcBcc: boolean;
 	subject: string;
 	body: string;
+	attachments: ComposeAttachment[];
 }
 
 const EMPTY_FIELDS: ComposeFormFields = {
@@ -50,6 +60,7 @@ const EMPTY_FIELDS: ComposeFormFields = {
 	showCcBcc: false,
 	subject: "",
 	body: "",
+	attachments: [],
 };
 
 function getPrefixedSubject(subject: string, prefix: "Re" | "Fwd") {
@@ -57,6 +68,16 @@ function getPrefixedSubject(subject: string, prefix: "Re" | "Fwd") {
 	return subject.startsWith(expectedPrefix)
 		? subject
 		: `${expectedPrefix}${subject}`;
+}
+
+/**
+ * True when the text the user wrote (not the quoted/forwarded part)
+ * mentions an attachment. Used for the "forgot to attach?" prompt.
+ */
+export function mentionsAttachment(html: string): boolean {
+	const cut = html.search(/<blockquote|Forwarded message:/i);
+	const own = htmlToPlainText(cut >= 0 ? html.slice(0, cut) : html);
+	return /\b(attach(ed|ing|ment|ments)?|enclosed)\b/i.test(own);
 }
 
 function buildForwardBody(
@@ -119,6 +140,7 @@ function buildInitialComposeFields(
 			showCcBcc: Boolean(draft.cc || draft.bcc),
 			subject: draft.subject || "",
 			body: draft.body || "",
+			attachments: fromStoredEmail(draft.id, draft.attachments),
 		};
 	}
 
@@ -153,6 +175,8 @@ function buildInitialComposeFields(
 			...EMPTY_FIELDS,
 			subject: getPrefixedSubject(original.subject, "Fwd"),
 			body: buildForwardBody(original, sigBlock),
+			// Like other mail clients, forwarding carries the original's files.
+			attachments: fromStoredEmail(original.id, original.attachments),
 		};
 	}
 
@@ -178,9 +202,20 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 	const [showCcBcc, setShowCcBcc] = useState(false);
 	const [subject, setSubject] = useState("");
 	const [body, setBody] = useState("");
+	const [attachments, setAttachmentsState] = useState<ComposeAttachment[]>([]);
+	const attachmentsRef = useRef<ComposeAttachment[]>([]);
+	const setAttachments = (next: ComposeAttachment[] | ((prev: ComposeAttachment[]) => ComposeAttachment[])) => {
+		const value = typeof next === "function" ? next(attachmentsRef.current) : next;
+		attachmentsRef.current = value;
+		setAttachmentsState(value);
+	};
+	// Id of the draft this form last saved to; changes on every save.
+	const [savedDraftId, setSavedDraftId] = useState<string | undefined>(undefined);
 	const [error, setError] = useState<string | null>(null);
 	const [isSavingDraft, setIsSavingDraft] = useState(false);
 	const [isSending, setIsSending] = useState(false);
+	// Synchronous lock: state updates land too late to stop rapid double clicks.
+	const busyRef = useRef(false);
 	const lastInitializedOptionsRef = useRef<typeof composeOptions | null>(null);
 	const isDraftEdit = !!composeOptions.draftEmail;
 
@@ -207,12 +242,56 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 		setShowCcBcc(initialFields.showCcBcc);
 		setSubject(initialFields.subject);
 		setBody(initialFields.body);
+		setAttachments(initialFields.attachments);
+		setSavedDraftId(composeOptions.draftEmail?.id || undefined);
 	}, [composeOptions, currentMailbox?.email, sigBlock]);
 
+	const addFiles = (files: FileList | File[]) => {
+		const list = Array.from(files);
+		if (list.length === 0) return;
+		// Read the latest list from a ref so two quick adds can't both pass
+		// the limit check, and keep side effects out of the state updater.
+		const { accepted, error: limitError } = checkLimits(attachmentsRef.current, list);
+		if (limitError) {
+			setError(limitError);
+			toastManager.add({ title: limitError, variant: "error" });
+		}
+		if (accepted.length) setAttachments((current) => [...current, ...accepted.map(fromFile)]);
+	};
+
+	const removeAttachment = (key: string) => {
+		setAttachments((current) => current.filter((a) => a.key !== key));
+	};
+
+	/**
+	 * Server-stored attachments belong to the email they were fetched from.
+	 * After a draft is re-saved that email is gone, so keep the bytes we
+	 * already loaded as local files instead.
+	 */
+	const localizeAttachments = (sent: ComposeAttachment[], payload: Awaited<ReturnType<typeof toPayload>>) => {
+		const contentByKey = new Map(sent.map((att, i) => [att.key, payload[i]?.content]));
+		setAttachments((current) => current.map((att) => {
+			const content = contentByKey.get(att.key);
+			if (att.source.kind === "file" || !content) return att;
+			const bytes = base64ToBytes(content);
+			const file = new File([bytes], att.filename, { type: att.type });
+			return { ...att, source: { kind: "file", file } };
+		}));
+	};
+
 	const handleSaveDraft = async () => {
-		if (!mailboxId || isSending) return; setIsSavingDraft(true); setError(null);
+		if (!mailboxId || busyRef.current) return;
+		const overLimit = limitError(attachmentsRef.current);
+		if (overLimit) { setError(overLimit); return; }
+		busyRef.current = true;
+		setIsSavingDraft(true); setError(null);
+		// If the user moves on to another message while this save is in
+		// flight, its result must not leak into the new compose session.
+		const session = composeOptions;
 		try {
-			await saveDraftMutation.mutateAsync({ mailboxId, draft: {
+			const sentAttachments = attachmentsRef.current;
+			const attachmentPayload = await toPayload(mailboxId, sentAttachments);
+			const saved = await saveDraftMutation.mutateAsync({ mailboxId, draft: {
 				to,
 				cc: cc || undefined,
 				bcc: bcc || undefined,
@@ -220,8 +299,13 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 				body,
 				in_reply_to: composeOptions.originalEmail?.id || composeOptions.draftEmail?.in_reply_to || undefined,
 				thread_id: composeOptions.originalEmail?.thread_id || composeOptions.draftEmail?.thread_id || undefined,
-				draft_id: composeOptions.draftEmail?.id || undefined,
+				draft_id: savedDraftId,
+				attachments: attachmentPayload.length ? attachmentPayload : undefined,
 			} });
+			if (lastInitializedOptionsRef.current === session) {
+				setSavedDraftId(saved?.id);
+				localizeAttachments(sentAttachments, attachmentPayload);
+			}
 			toastManager.add({ title: "Draft saved!" });
 		}
 		catch (err: unknown) {
@@ -229,18 +313,22 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 			setError(message);
 			toastManager.add({ title: message, variant: "error" });
 		}
-		finally { setIsSavingDraft(false); }
+		finally { busyRef.current = false; setIsSavingDraft(false); }
 	};
 
 	const handleSend = async (e: FormEvent, onClose: () => void) => {
-		e.preventDefault(); if (isSending) return; setError(null);
+		e.preventDefault(); if (busyRef.current) return; setError(null);
 		if (!currentMailbox || !mailboxId) { setError("No mailbox selected."); return; }
 		const toRecipients = splitEmailList(to);
 		if (toRecipients.length === 0) { setError("Add at least one recipient."); return; }
+		const overLimit = limitError(attachments);
+		if (overLimit) { setError(overLimit); return; }
+		if (attachments.length === 0 && mentionsAttachment(body)
+			&& !window.confirm("Your message mentions an attachment, but no files are attached. Send anyway?")) return;
 		const ccRecipients = splitEmailList(cc); const bccRecipients = splitEmailList(bcc);
 		const fromName = currentMailbox.settings?.fromName || currentMailbox.name;
 		const from = fromName && fromName !== currentMailbox.email ? { email: currentMailbox.email, name: fromName } : currentMailbox.email;
-		const emailData = {
+		const emailData: Record<string, unknown> = {
 			to: toEmailListValue(toRecipients),
 			cc: toEmailListValue(ccRecipients),
 			bcc: toEmailListValue(bccRecipients),
@@ -249,9 +337,11 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 			html: body,
 			text: htmlToPlainText(body),
 		};
-		const draftId = composeOptions.draftEmail?.id; const mode = composeOptions.mode; const originalId = composeOptions.originalEmail?.id || composeOptions.draftEmail?.in_reply_to;
+		const draftId = savedDraftId; const mode = composeOptions.mode; const originalId = composeOptions.originalEmail?.id || composeOptions.draftEmail?.in_reply_to;
+		busyRef.current = true;
 		setIsSending(true); toastManager.add({ title: "Sending email..." });
 		try {
+			if (attachments.length > 0) emailData.attachments = await toPayload(mailboxId, attachments);
 			if ((mode === "reply" || mode === "reply-all") && originalId) await replyMutation.mutateAsync({ mailboxId, emailId: originalId, email: emailData });
 			else if (mode === "forward" && originalId) await forwardMutation.mutateAsync({ mailboxId, emailId: originalId, email: emailData });
 			else await sendEmailMutation.mutateAsync({ mailboxId, email: emailData });
@@ -259,8 +349,8 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 			toastManager.add({ title: "Email sent!" });
 			onClose();
 		} catch (err: unknown) { const message = (err instanceof Error ? err.message : null) || "Failed to send email."; setError(message); toastManager.add({ title: message, variant: "error" }); }
-		finally { setIsSending(false); }
+		finally { busyRef.current = false; setIsSending(false); }
 	};
 
-	return { to, setTo, cc, setCc, bcc, setBcc, showCcBcc, setShowCcBcc, subject, setSubject, body, setBody, error, setError, isSavingDraft, isSending, formTitle, handleSaveDraft, handleSend, closeCompose, closePanel };
+	return { to, setTo, cc, setCc, bcc, setBcc, showCcBcc, setShowCcBcc, subject, setSubject, body, setBody, attachments, addFiles, removeAttachment, error, setError, isSavingDraft, isSending, formTitle, handleSaveDraft, handleSend, closeCompose, closePanel };
 }

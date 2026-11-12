@@ -2,6 +2,8 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
+import { base64ToBytes } from "../shared/attachments";
+
 /**
  * Email sending via Cloudflare Email Service binding.
  *
@@ -59,7 +61,10 @@ export async function sendEmail(
 
 	if (params.attachments && params.attachments.length > 0) {
 		message.attachments = params.attachments.map((att) => ({
-			content: att.content,
+			// Pass decoded bytes rather than the base64 string. The binding
+			// accepts both, but bytes are unambiguous (the local emulator
+			// treats strings as literal content).
+			content: base64ToBytes(att.content),
 			filename: att.filename,
 			type: att.type,
 			disposition: att.disposition,

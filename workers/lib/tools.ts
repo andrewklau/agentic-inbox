@@ -26,6 +26,7 @@ import {
 	buildReferencesChain,
 	buildThreadingHeaders,
 } from "./email-helpers";
+import type { StoredAttachment } from "./attachments";
 import { verifyDraft } from "./ai";
 import { isConfiguredDomain } from "./config";
 import { sendEmail } from "../email-sender";
@@ -301,7 +302,18 @@ export async function toolUpdateDraft(
 		return { error: "Draft verification failed — keeping existing draft unchanged. Please try again." };
 	}
 
-	await stub.deleteEmail(params.draftId);
+	// Carry the draft's files over to the new version (R2 keys include the
+	// email id, so each object is copied), then remove the old version.
+	const oldAttachments = (oldDraft as { attachments?: { id: string; filename: string; mimetype: string; size: number; content_id: string | null; disposition: string }[] }).attachments ?? [];
+	const carried: StoredAttachment[] = [];
+	for (const att of oldAttachments) {
+		const obj = await env.BUCKET.get(`attachments/${params.draftId}/${att.id}/${att.filename}`);
+		if (!obj) continue;
+		const id = crypto.randomUUID();
+		await env.BUCKET.put(`attachments/${newDraftId}/${id}/${att.filename}`, obj.body);
+		carried.push({ ...att, id, email_id: newDraftId });
+	}
+
 	await stub.createEmail(
 		Folders.DRAFT,
 		{
@@ -315,8 +327,13 @@ export async function toolUpdateDraft(
 			email_references: oldDraft.email_references || null,
 			thread_id: oldDraft.thread_id || newDraftId,
 		},
-		[],
+		carried,
 	);
+	const removed = await stub.deleteEmail(params.draftId);
+	if (removed?.length) {
+		await env.BUCKET.delete(removed.map((att: { id: string; filename: string }) => `attachments/${params.draftId}/${att.id}/${att.filename}`))
+			.catch((e) => console.error("Failed to delete old draft attachments:", (e as Error).message));
+	}
 
 	return {
 		status: "draft_updated",
