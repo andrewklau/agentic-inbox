@@ -2,6 +2,7 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
+import type { AttachmentPayload } from "~/lib/compose-attachments";
 import type { Email, Folder, Mailbox } from "~/types";
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -18,12 +19,17 @@ export class ApiError extends Error {
 	}
 }
 
+// Requests carrying attachments upload up to ~25 MB of base64; give them
+// enough time on slow connections.
+const UPLOAD_TIMEOUT_MS = 5 * 60_000;
+
 async function request<T>(
 	url: string,
 	options: RequestInit = {},
+	timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<T> {
 	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
 	// Combine caller signal (e.g. TanStack Query abort) with our timeout signal
 	const signal = options.signal
@@ -67,11 +73,13 @@ function get<T>(url: string, opts?: { params?: Record<string, string>; responseT
 }
 
 function post<T>(url: string, body?: unknown, opts?: { signal?: AbortSignal }) {
+	const hasAttachments = Array.isArray((body as { attachments?: unknown[] } | undefined)?.attachments)
+		&& ((body as { attachments: unknown[] }).attachments.length > 0);
 	return request<T>(url, {
 		method: "POST",
 		signal: opts?.signal,
 		body: body != null ? JSON.stringify(body) : undefined,
-	});
+	}, hasAttachments ? UPLOAD_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
 }
 
 function put<T>(url: string, body?: unknown) {
@@ -140,8 +148,9 @@ const api = {
 			in_reply_to?: string;
 			thread_id?: string;
 			draft_id?: string;
+			attachments?: AttachmentPayload[];
 		},
-	) => post<{ draft_id: string }>(`/api/v1/mailboxes/${mailboxId}/drafts`, draft),
+	) => post<{ id: string; status: "draft" }>(`/api/v1/mailboxes/${mailboxId}/drafts`, draft),
 	replyToEmail: (mailboxId: string, emailId: string, email: unknown) =>
 		post<void>(`/api/v1/mailboxes/${mailboxId}/emails/${emailId}/reply`, email),
 	forwardEmail: (mailboxId: string, emailId: string, email: unknown) =>

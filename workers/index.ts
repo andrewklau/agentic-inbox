@@ -4,6 +4,7 @@
 
 import { type Context, Hono } from "hono";
 import { cors } from "hono/cors";
+import { HTTPException } from "hono/http-exception";
 import PostalMime from "postal-mime";
 import { z } from "zod";
 import { sendEmail } from "./email-sender";
@@ -15,7 +16,7 @@ import {
 	buildThreadingHeaders,
 	listMailboxes,
 } from "./lib/email-helpers";
-import { SendEmailRequestSchema } from "./lib/schemas";
+import { OutgoingAttachmentsSchema, SendEmailRequestSchema } from "./lib/schemas";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -41,6 +42,7 @@ const DraftBody = z.object({
 	in_reply_to: z.string().optional(),
 	thread_id: z.string().optional(),
 	draft_id: z.string().optional(),
+	attachments: OutgoingAttachmentsSchema,
 });
 
 // -- Helpers --------------------------------------------------------
@@ -67,6 +69,15 @@ function boolQuery(c: AppContext, key: string): boolean | undefined {
 // -- App & middleware -----------------------------------------------
 
 const app = new Hono<MailboxContext>();
+// Malformed request bodies are client errors, not server errors.
+app.onError((err, c) => {
+	if (err instanceof z.ZodError) {
+		return c.json({ error: err.issues[0]?.message || "Invalid request" }, 400);
+	}
+	if (err instanceof HTTPException) return err.getResponse();
+	console.error(err);
+	return c.json({ error: "Internal server error" }, 500);
+});
 app.use("/api/*", cors({
 	origin: (origin) => {
 		// Same-origin requests have no Origin header — allow them.
@@ -231,17 +242,25 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 
 app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	const mailboxId = c.req.param("mailboxId")!;
-	const { to, cc, bcc, subject, body, in_reply_to, thread_id, draft_id } = DraftBody.parse(await c.req.json());
+	const { to, cc, bcc, subject, body, in_reply_to, thread_id, draft_id, attachments } = DraftBody.parse(await c.req.json());
 	const stub = c.var.mailboxStub;
-	if (draft_id) await stub.deleteEmail(draft_id); // not atomic — create-then-delete would be safer
 	const messageId = crypto.randomUUID();
 	const now = new Date().toISOString();
+	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 	await stub.createEmail(Folders.DRAFT, {
 		id: messageId, subject: subject || "", sender: mailboxId.toLowerCase(),
 		recipient: (to || "").toLowerCase(), cc: cc?.toLowerCase() || null, bcc: bcc?.toLowerCase() || null,
 		date: now, body, in_reply_to: in_reply_to || null, email_references: null,
 		thread_id: thread_id || in_reply_to || messageId,
-	}, []);
+	}, attachmentData);
+	// Replace the previous version only once the new one is stored.
+	if (draft_id) {
+		const old = await stub.deleteEmail(draft_id);
+		if (old?.length) {
+			await c.env.BUCKET.delete(old.map((att: any) => `attachments/${draft_id}/${att.id}/${att.filename}`))
+				.catch((e) => console.error("Failed to delete old draft attachments:", (e as Error).message));
+		}
+	}
 	return c.json({ id: messageId, status: "draft", subject: subject || "", recipient: to || "", date: now }, 201);
 });
 

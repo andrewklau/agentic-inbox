@@ -7,6 +7,7 @@ import { FloppyDiskIcon, PaperPlaneTiltIcon, XIcon } from "@phosphor-icons/react
 import { useParams } from "react-router";
 import { useComposeForm } from "~/hooks/useComposeForm";
 import RichTextEditor from "./RichTextEditor";
+import { AttachButton, AttachmentChips, DropOverlay, useAttachmentDrop } from "./ComposeAttachments";
 
 export default function ComposePanel() {
 	const { mailboxId, folder } = useParams<{
@@ -27,6 +28,9 @@ export default function ComposePanel() {
 		setSubject,
 		body,
 		setBody,
+		attachments,
+		addFiles,
+		removeAttachment,
 		error,
 		isSavingDraft,
 		isSending,
@@ -36,6 +40,8 @@ export default function ComposePanel() {
 		closeCompose,
 		closePanel,
 	} = useComposeForm(mailboxId, folder);
+	const busy = isSending || isSavingDraft;
+	const { isDragging, dropHandlers } = useAttachmentDrop(addFiles, busy);
 
 	return (
 		<div className="flex flex-col h-full bg-kumo-base">
@@ -58,8 +64,10 @@ export default function ComposePanel() {
 
 			<form
 				onSubmit={(e) => handleSend(e, closePanel)}
-				className="flex flex-col flex-1 min-h-0 overflow-y-auto"
+				className="relative flex flex-col flex-1 min-h-0 overflow-y-auto"
+				{...dropHandlers}
 			>
+				{isDragging && <DropOverlay />}
 				<div className="p-4 md:p-6 space-y-4">
 					{error && <Banner variant="error" text={error} />}
 
@@ -146,6 +154,8 @@ export default function ComposePanel() {
 							onChange={setBody}
 						/>
 					</div>
+
+					<AttachmentChips attachments={attachments} onRemove={removeAttachment} disabled={busy} />
 				</div>
 
 				{/* Footer actions */}
@@ -155,6 +165,7 @@ export default function ComposePanel() {
 							Discard
 						</Button>
 						<div className="flex items-center gap-2">
+							<AttachButton onFiles={addFiles} disabled={busy} />
 							<Button
 								type="button"
 								variant="secondary"

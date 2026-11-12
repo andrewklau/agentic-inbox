@@ -29,6 +29,13 @@ export interface SendEmailParams {
 	headers?: Record<string, string>;
 }
 
+function base64ToBytes(b64: string): Uint8Array {
+	const binary = atob(b64);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+	return bytes;
+}
+
 /**
  * Send an email using the Cloudflare Email Service binding.
  *
@@ -59,7 +66,10 @@ export async function sendEmail(
 
 	if (params.attachments && params.attachments.length > 0) {
 		message.attachments = params.attachments.map((att) => ({
-			content: att.content,
+			// Pass decoded bytes rather than the base64 string. The binding
+			// accepts both, but bytes are unambiguous (the local emulator
+			// treats strings as literal content).
+			content: base64ToBytes(att.content),
 			filename: att.filename,
 			type: att.type,
 			disposition: att.disposition,

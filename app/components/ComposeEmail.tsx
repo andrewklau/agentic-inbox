@@ -7,6 +7,7 @@ import { FloppyDiskIcon, PaperPlaneTiltIcon } from "@phosphor-icons/react";
 import { useParams } from "react-router";
 import { useComposeForm } from "~/hooks/useComposeForm";
 import RichTextEditor from "./RichTextEditor";
+import { AttachButton, AttachmentChips, DropOverlay, useAttachmentDrop } from "./ComposeAttachments";
 import { useUIStore } from "~/hooks/useUIStore";
 
 export default function ComposeEmail() {
@@ -30,6 +31,9 @@ export default function ComposeEmail() {
 		setSubject,
 		body,
 		setBody,
+		attachments,
+		addFiles,
+		removeAttachment,
 		error,
 		isSavingDraft,
 		isSending,
@@ -37,6 +41,8 @@ export default function ComposeEmail() {
 		handleSaveDraft,
 		handleSend,
 	} = useComposeForm(mailboxId, folder);
+	const busy = isSending || isSavingDraft;
+	const { isDragging, dropHandlers } = useAttachmentDrop(addFiles, busy);
 
 	return (
 		<Dialog.Root
@@ -47,7 +53,8 @@ export default function ComposeEmail() {
 				<Dialog.Title className="text-lg font-semibold mb-5">
 					{formTitle}
 				</Dialog.Title>
-				<form onSubmit={(e) => handleSend(e, closeComposeModal)} className="space-y-4">
+				<form onSubmit={(e) => handleSend(e, closeComposeModal)} className="relative space-y-4" {...dropHandlers}>
+					{isDragging && <DropOverlay />}
 					{error && <Banner variant="error" text={error} />}
 					<div className="flex items-center gap-2">
 						<div className="flex-1">
@@ -106,6 +113,7 @@ export default function ComposeEmail() {
 						</Text>
 						<RichTextEditor value={body} onChange={setBody} />
 					</div>
+					<AttachmentChips attachments={attachments} onRemove={removeAttachment} disabled={busy} />
 					<div className="flex justify-between items-center pt-2">
 						<Button
 							type="button"
@@ -117,6 +125,7 @@ export default function ComposeEmail() {
 							Discard
 						</Button>
 						<div className="flex items-center gap-2">
+							<AttachButton onFiles={addFiles} disabled={busy} />
 							<Button
 								type="button"
 								variant="secondary"
